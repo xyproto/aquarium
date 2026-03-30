@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -11,7 +12,6 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-// Depth constants for Z-ordering
 const (
 	DepthGUIText   = 0
 	DepthGUI       = 1
@@ -31,67 +31,66 @@ const (
 	DepthWaterGap0  = 9
 )
 
-// Entity represents an object in the aquarium
+// Entity represents any object in the aquarium.
 type Entity struct {
 	Name         string
 	Type         string
-	Shape        []string // multi-line ASCII art (or single-char frames for animation)
-	Position     [3]int   // x, y, z (depth)
-	Color        []string // color mask matching shape
+	Shape        []string   // single-frame multi-line shape
+	Shapes       [][]string // multi-frame animation (each element = one frame = []string of lines)
+	Color        []string   // color mask for Shape
+	Colors       [][]string // color masks for each frame in Shapes
+	Position     [3]int     // x, y, z (z: higher = further back, rendered first)
 	DefaultColor tcell.Color
-	Physical     bool // can collide
+	Physical     bool
 	DieOffscreen bool
 	DieTime      time.Time
 	DeathCB      func(*Entity, *Animation)
-	CallbackArgs []float64                 // for animation state (vx, vy, etc)
-	UpdateFn     func(*Entity, *Animation) // per-frame update function
-	FrameIndex   int                       // for animated entities
-	FrameDelay   int                       // frames between animation updates
+	UpdateFn     func(*Entity, *Animation)
+	FrameIndex   int
+	FrameDelay   int // update-ticks between frame advances (0 = advance every tick)
+	FrameTick    int
+	FloatX       float64 // sub-cell x accumulator
+	FloatY       float64 // sub-cell y accumulator
+	VX           float64 // x velocity (cells per update tick)
+	VY           float64 // y velocity (cells per update tick)
+	// Path animation (dolphins): sequence of (vx,vy) velocity steps
+	Path      [][2]float64
+	PathIndex int
 }
 
-// Size returns the width and height of the entity
+// currentShape returns the active shape and color mask for the current frame.
+func (e *Entity) currentShape() ([]string, []string) {
+	if len(e.Shapes) > 0 {
+		idx := e.FrameIndex % len(e.Shapes)
+		shape := e.Shapes[idx]
+		var col []string
+		if idx < len(e.Colors) {
+			col = e.Colors[idx]
+		} else if len(e.Color) > 0 {
+			col = e.Color
+		}
+		return shape, col
+	}
+	return e.Shape, e.Color
+}
+
+// Size returns the bounding box of the entity in terminal cells.
 func (e *Entity) Size() (int, int) {
-	if len(e.Shape) == 0 {
+	shape, _ := e.currentShape()
+	if len(shape) == 0 {
 		return 0, 0
 	}
-
-	// For single-character animated frames, return (1, 1)
-	if len(e.Shape) > 0 && len(e.Shape[0]) == 1 && len(e.Shape) > 3 {
-		// This looks like animation frames (multiple single characters)
-		return 1, 1
-	}
-
-	width := 0
-	for _, line := range e.Shape {
-		if len(line) > width {
-			width = len(line)
+	maxW := 0
+	for _, line := range shape {
+		w := len([]rune(line))
+		if w > maxW {
+			maxW = w
 		}
 	}
-	return width, len(e.Shape)
+	return maxW, len(shape)
 }
 
-// CurrentFrame returns the current animation frame
-func (e *Entity) CurrentFrame() string {
-	if len(e.Shape) == 0 {
-		return ""
-	}
-	// Check if this is animated (all elements are single characters or very short)
-	isAnimated := true
-	for _, s := range e.Shape {
-		if len(s) > 1 {
-			isAnimated = false
-			break
-		}
-	}
-
-	if isAnimated {
-		return e.Shape[e.FrameIndex%len(e.Shape)]
-	}
-	// Not animated, return as multi-line
-	return ""
-}
-
-// Animation manages the aquarium state
+// Animation manages all entities and drives the render loop.
 type Animation struct {
 	screen      tcell.Screen
 	entities    map[string]*Entity
@@ -101,20 +100,25 @@ type Animation struct {
 	paused      bool
 	colorMap    map[byte]tcell.Color
 	version     string
+	kitty       *KittyRenderer
 }
 
-// NewAnimation creates a new animation with terminal
 func NewAnimation() (*Animation, error) {
 	s, err := tcell.NewScreen()
 	if err != nil {
 		return nil, err
 	}
-
 	if err := s.Init(); err != nil {
 		return nil, err
 	}
 
-	s.SetStyle(tcell.StyleDefault.Background(tcell.GetColor("black")).Foreground(tcell.GetColor("white")))
+	var bgColor tcell.Color
+	if isKittyTerminal() {
+		bgColor = tcell.NewRGBColor(0, 8, 24) // deep ocean blue
+	} else {
+		bgColor = tcell.ColorBlack
+	}
+	s.SetStyle(tcell.StyleDefault.Background(bgColor).Foreground(tcell.ColorWhite))
 	s.Clear()
 
 	w, h := s.Size()
@@ -127,11 +131,17 @@ func NewAnimation() (*Animation, error) {
 		colorMap: makeColorMap(),
 	}
 
+	if isKittyTerminal() {
+		anim.kitty = NewKittyRenderer()
+	}
+
 	return anim, nil
 }
 
-// makeColorMap creates the color code to tcell.Color mapping
 func makeColorMap() map[byte]tcell.Color {
+	if isKittyTerminal() {
+		return makeKittyColorMap()
+	}
 	return map[byte]tcell.Color{
 		'c': tcell.GetColor("cyan"),
 		'C': tcell.GetColor("darkcyan"),
@@ -147,69 +157,71 @@ func makeColorMap() map[byte]tcell.Color {
 		'M': tcell.GetColor("purple"),
 		'w': tcell.GetColor("white"),
 		'W': tcell.GetColor("gray"),
-		'k': tcell.GetColor("black"),
-		'K': tcell.GetColor("black"),
+		'k': tcell.ColorBlack,
+		'K': tcell.ColorBlack,
 	}
 }
 
-// Width returns the terminal width
-func (a *Animation) Width() int {
-	return a.width
-}
+func (a *Animation) Width() int  { return a.width }
+func (a *Animation) Height() int { return a.height }
 
-// Height returns the terminal height
-func (a *Animation) Height() int {
-	return a.height
-}
-
-// UpdateTermSize updates width/height from current terminal
 func (a *Animation) UpdateTermSize() {
 	a.width, a.height = a.screen.Size()
 }
 
-// NewEntity creates and adds an entity to the animation
 func (a *Animation) NewEntity(e *Entity) {
 	a.entityMutex.Lock()
 	defer a.entityMutex.Unlock()
 	if e.Name == "" {
-		e.Name = fmt.Sprintf("entity_%d", len(a.entities))
+		e.Name = fmt.Sprintf("entity_%d_%d", len(a.entities), rand.Int63())
 	}
+	// Sync float positions with integer positions on creation
+	e.FloatX = float64(e.Position[0])
+	e.FloatY = float64(e.Position[1])
 	a.entities[e.Name] = e
 }
 
-// RemoveEntity removes an entity by name
 func (a *Animation) RemoveEntity(name string) {
 	a.entityMutex.Lock()
 	defer a.entityMutex.Unlock()
 	delete(a.entities, name)
 }
 
-// RemoveAllEntities clears all entities
 func (a *Animation) RemoveAllEntities() {
 	a.entityMutex.Lock()
 	defer a.entityMutex.Unlock()
 	a.entities = make(map[string]*Entity)
 }
 
-// GetEntities returns a copy of all entities
 func (a *Animation) GetEntities() []*Entity {
 	a.entityMutex.RLock()
 	defer a.entityMutex.RUnlock()
-	var result []*Entity
+	result := make([]*Entity, 0, len(a.entities))
 	for _, e := range a.entities {
 		result = append(result, e)
 	}
 	return result
 }
 
-// GetEntity retrieves an entity by name
 func (a *Animation) GetEntity(name string) *Entity {
 	a.entityMutex.RLock()
 	defer a.entityMutex.RUnlock()
 	return a.entities[name]
 }
 
-// Animate updates all entities
+func (a *Animation) GetEntitiesOfType(t string) []*Entity {
+	a.entityMutex.RLock()
+	defer a.entityMutex.RUnlock()
+	var result []*Entity
+	for _, e := range a.entities {
+		if e.Type == t {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// Animate advances all entity logic by one update tick.
 func (a *Animation) Animate() {
 	if a.paused {
 		return
@@ -218,9 +230,8 @@ func (a *Animation) Animate() {
 	entities := a.GetEntities()
 	now := time.Now()
 
-	// First, update all entities
 	for _, e := range entities {
-		// Check if entity should die
+		// Check die-time
 		if !e.DieTime.IsZero() && now.After(e.DieTime) {
 			if e.DeathCB != nil {
 				e.DeathCB(e, a)
@@ -229,172 +240,112 @@ func (a *Animation) Animate() {
 			continue
 		}
 
-		// Check if entity went offscreen
+		// Check die-offscreen
 		if e.DieOffscreen {
 			w, h := e.Size()
-			if e.Position[0]+w < 0 || e.Position[0] > a.width ||
-				e.Position[1]+h < 0 || e.Position[1] > a.height {
+			x, y := e.Position[0], e.Position[1]
+			if x+w < 0 || x > a.width || y+h < 0 || y > a.height {
+				if e.DeathCB != nil {
+					e.DeathCB(e, a)
+				}
 				a.RemoveEntity(e.Name)
 				continue
 			}
 		}
 
-		// Update animation frame for animated entities
-		if len(e.Shape) > 0 {
-			// Check if animated (all single characters)
-			isAnimated := true
-			for _, s := range e.Shape {
-				if len(s) > 1 {
-					isAnimated = false
-					break
-				}
+		// Advance multi-frame animation
+		if len(e.Shapes) > 1 {
+			e.FrameTick++
+			delay := e.FrameDelay
+			if delay <= 0 {
+				delay = 1
 			}
-			if isAnimated {
-				e.FrameIndex++
+			if e.FrameTick >= delay {
+				e.FrameTick = 0
+				e.FrameIndex = (e.FrameIndex + 1) % len(e.Shapes)
 			}
 		}
 
-		// Call update function if present
+		// Call per-entity update
 		if e.UpdateFn != nil {
 			e.UpdateFn(e, a)
 		}
 	}
-
-	// Check for collisions between physical entities
-	a.checkCollisions()
 }
 
-// checkCollisions detects collisions between physical entities
-func (a *Animation) checkCollisions() {
-	entities := a.GetEntities()
-	physicalEntities := make([]*Entity, 0)
-
-	// Gather physical entities
-	for _, e := range entities {
-		if e.Physical {
-			physicalEntities = append(physicalEntities, e)
-		}
-	}
-
-	// Check each pair for collision
-	for i := 0; i < len(physicalEntities); i++ {
-		for j := i + 1; j < len(physicalEntities); j++ {
-			e1 := physicalEntities[i]
-			e2 := physicalEntities[j]
-
-			if a.isColliding(e1, e2) {
-				// Handle collision - for now just remove one
-				// In the future could add damage, special effects, etc
-				if e1.DeathCB != nil {
-					e1.DeathCB(e1, a)
-				}
-				a.RemoveEntity(e1.Name)
-				break
-			}
-		}
-	}
-}
-
-// isColliding checks if two entities are colliding
-func (a *Animation) isColliding(e1, e2 *Entity) bool {
-	w1, h1 := e1.Size()
-	w2, h2 := e2.Size()
-
-	// Simple bounding box collision
-	return !(e1.Position[0]+w1 < e2.Position[0] ||
-		e2.Position[0]+w2 < e1.Position[0] ||
-		e1.Position[1]+h1 < e2.Position[1] ||
-		e2.Position[1]+h2 < e1.Position[1])
-}
-
-// RenderScreen draws all entities to the screen
+// RenderScreen draws all entities and shows the frame.
 func (a *Animation) RenderScreen() {
 	a.screen.Clear()
 
 	entities := a.GetEntities()
 
-	// Sort entities by depth (Z)
-	for i := range entities {
-		for j := i + 1; j < len(entities); j++ {
-			if entities[i].Position[2] > entities[j].Position[2] {
-				entities[i], entities[j] = entities[j], entities[i]
-			}
-		}
-	}
+	// Higher Z value = further back = rendered first (lower Z is drawn on top)
+	sort.Slice(entities, func(i, j int) bool {
+		return entities[i].Position[2] > entities[j].Position[2]
+	})
 
-	// Draw each entity
 	for _, e := range entities {
 		a.drawEntity(e)
 	}
 
 	a.screen.Show()
+
+	// Kitty graphics overlay (rendered after tcell frame)
+	if a.kitty != nil && a.kitty.enabled {
+		a.kitty.Render(a)
+	}
 }
 
-// drawEntity renders a single entity
+func (a *Animation) bgStyle() tcell.Style {
+	if isKittyTerminal() {
+		return tcell.StyleDefault.Background(tcell.NewRGBColor(0, 8, 24))
+	}
+	return tcell.StyleDefault.Background(tcell.ColorBlack)
+}
+
 func (a *Animation) drawEntity(e *Entity) {
 	x := e.Position[0]
 	y := e.Position[1]
+	shape, colorMask := e.currentShape()
 
-	// Check if this is an animated single-frame entity
-	isAnimated := true
-	if len(e.Shape) > 0 {
-		for _, s := range e.Shape {
-			if len(s) > 1 {
-				isAnimated = false
-				break
-			}
-		}
-	} else {
-		isAnimated = false
-	}
+	for row, line := range shape {
+		col := 0
+		for _, ch := range line {
+			px := x + col
+			py := y + row
+			col++
 
-	// Render animated frame (single character)
-	if isAnimated && len(e.Shape) > 0 {
-		frameChar := e.Shape[e.FrameIndex%len(e.Shape)]
-		if len(frameChar) > 0 && frameChar != "\n" && frameChar != "\r" {
-			px := x
-			py := y
-
-			if px >= 0 && px < a.width && py >= 0 && py < a.height {
-				style := tcell.StyleDefault.Foreground(e.DefaultColor).Background(tcell.GetColor("black"))
-				a.screen.SetContent(px, py, rune(frameChar[0]), nil, style)
-			}
-		}
-		return
-	}
-
-	// Render multi-line shape
-	for row, line := range e.Shape {
-		for col, ch := range line {
-			if ch == '\n' || ch == '\r' {
+			// Space = transparent (skip, show entity beneath)
+			if ch == ' ' {
 				continue
 			}
 
-			px := x + col
-			py := y + row
-
-			// Skip if out of bounds
 			if px < 0 || px >= a.width || py < 0 || py >= a.height {
 				continue
 			}
 
-			// Determine color
+			// Determine color from mask
 			color := e.DefaultColor
-			if len(e.Color) > row && col < len(e.Color[row]) {
-				colorByte := byte(e.Color[row][col])
-				if c, ok := a.colorMap[colorByte]; ok && colorByte != ' ' {
-					color = c
+			if row < len(colorMask) {
+				maskRunes := []rune(colorMask[row])
+				if col-1 < len(maskRunes) {
+					cb := byte(maskRunes[col-1])
+					if c, ok := a.colorMap[cb]; ok {
+						color = c
+					}
 				}
 			}
 
-			style := tcell.StyleDefault.Foreground(color).Background(tcell.GetColor("black"))
+			style := a.bgStyle().Foreground(color)
 			a.screen.SetContent(px, py, ch, nil, style)
 		}
 	}
 }
 
-// Close cleans up the terminal
 func (a *Animation) Close() {
+	if a.kitty != nil && a.kitty.enabled {
+		a.kitty.Cleanup()
+	}
 	a.screen.Fini()
 }
 
@@ -406,11 +357,14 @@ func main() {
 	}
 	defer anim.Close()
 
-	// Initialize entities
+	// Upload fish images for Kitty mode
+	if anim.kitty != nil && anim.kitty.enabled {
+		anim.kitty.Init()
+	}
+
 	initializeAquarium(anim)
 
-	// Set up terminal input
-	done := make(chan bool)
+	done := make(chan bool, 1)
 	go func() {
 		for {
 			ev := anim.screen.PollEvent()
@@ -418,16 +372,18 @@ func main() {
 				done <- true
 				return
 			}
-
 			switch ev := ev.(type) {
 			case *tcell.EventKey:
-				switch ev.Rune() {
-				case 'q':
+				switch {
+				case ev.Rune() == 'q' || ev.Rune() == 'Q':
 					done <- true
 					return
-				case 'p':
+				case ev.Key() == tcell.KeyEscape || ev.Key() == tcell.KeyCtrlC:
+					done <- true
+					return
+				case ev.Rune() == 'p' || ev.Rune() == 'P':
 					anim.paused = !anim.paused
-				case 'r':
+				case ev.Rune() == 'r' || ev.Rune() == 'R':
 					anim.UpdateTermSize()
 					anim.RemoveAllEntities()
 					initializeAquarium(anim)
@@ -440,70 +396,75 @@ func main() {
 		}
 	}()
 
-	// Main animation loop
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	spawnTicker := time.NewTicker(2 * time.Second)
+	renderTicker := time.NewTicker(50 * time.Millisecond)  // 20 fps
+	updateTicker := time.NewTicker(100 * time.Millisecond) // 10 fps entity updates (matches Perl)
+	spawnTicker := time.NewTicker(6 * time.Second)
+	defer renderTicker.Stop()
+	defer updateTicker.Stop()
 	defer spawnTicker.Stop()
 
 	for {
 		select {
 		case <-done:
 			return
-		case <-ticker.C:
+		case <-updateTicker.C:
 			anim.Animate()
+		case <-renderTicker.C:
 			anim.RenderScreen()
 		case <-spawnTicker.C:
-			// Occasionally spawn random creatures
-			if rand.Float64() < 0.6 {
+			if rand.Float64() < 0.7 {
 				randomObject(anim)
 			}
 		}
 	}
 }
 
-// initializeAquarium sets up the static aquarium environment
+// initializeAquarium sets up the static and initial dynamic elements.
 func initializeAquarium(anim *Animation) {
 	addEnvironment(anim)
 	addCastle(anim)
 	addAllSeaweed(anim)
 	addAllFish(anim)
+	// Spawn a couple of random objects to populate the screen immediately
+	randomObject(anim)
+	randomObject(anim)
 }
 
-// addEnvironment adds water line segments
+// addEnvironment adds tiled water-line segments across the screen.
 func addEnvironment(anim *Animation) {
-	waterLines := []string{
+	waterLineSegments := []string{
 		"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
 		"^^^^ ^^^  ^^^   ^^^    ^^^^      ",
 		"^^^^      ^^^^     ^^^    ^^     ",
 		"^^      ^^^^      ^^^    ^^^^^^  ",
 	}
 
-	segmentSize := len(waterLines[0])
-	segmentRepeat := anim.Width()/segmentSize + 2
+	segLen := len(waterLineSegments[0])
+	repeat := anim.Width()/segLen + 2
 
-	for i, seg := range waterLines {
-		var repeated strings.Builder
-		for range segmentRepeat {
-			repeated.WriteString(seg)
+	depths := []int{DepthWaterLine0, DepthWaterLine1, DepthWaterLine2, DepthWaterLine3}
+
+	for i, seg := range waterLineSegments {
+		var b strings.Builder
+		for range repeat {
+			b.WriteString(seg)
 		}
+		line := b.String()
 
-		e := &Entity{
+		anim.NewEntity(&Entity{
 			Name:         fmt.Sprintf("water_seg_%d", i),
 			Type:         "waterline",
-			Shape:        []string{repeated.String()},
-			Position:     [3]int{0, 5 + i, DepthWaterLine0 + i},
+			Shape:        []string{line},
+			Position:     [3]int{0, 5 + i, depths[i]},
 			DefaultColor: tcell.GetColor("cyan"),
 			Physical:     true,
-		}
-		anim.NewEntity(e)
+		})
 	}
 }
 
-// addCastle adds the castle decoration
+// addCastle adds the castle decoration.
 func addCastle(anim *Animation) {
-	castleImage := []string{
+	castleShape := []string{
 		"               T~~",
 		"               |",
 		"              /^\\",
@@ -518,7 +479,6 @@ func addCastle(anim *Animation) {
 		" |- =_   | =| | | |  |- = -  |",
 		" |_______|__|_|_|_|__|_______|",
 	}
-
 	castleColor := []string{
 		"                RR",
 		"",
@@ -535,67 +495,54 @@ func addCastle(anim *Animation) {
 		"            yyyyyyy",
 	}
 
-	e := &Entity{
+	anim.NewEntity(&Entity{
 		Name:         "castle",
-		Shape:        castleImage,
+		Shape:        castleShape,
 		Color:        castleColor,
 		Position:     [3]int{anim.Width() - 32, anim.Height() - 13, DepthCastle},
-		DefaultColor: tcell.GetColor("black"),
-	}
-	anim.NewEntity(e)
+		DefaultColor: tcell.ColorBlack,
+	})
 }
 
-// addAllSeaweed adds seaweed randomly across screen
+// addAllSeaweed plants seaweed proportional to screen width.
 func addAllSeaweed(anim *Animation) {
-	seaweedCount := anim.Width() / 15
-	for range seaweedCount {
+	count := anim.Width() / 15
+	for range count {
 		addSeaweed(anim)
 	}
 }
 
-// addSeaweed adds a single seaweed entity
+// addSeaweed plants a single seaweed entity.
 func addSeaweed(anim *Animation) {
 	height := rand.Intn(4) + 3
-	left := make([]string, height)
-	right := make([]string, height)
-
+	shape := make([]string, height)
 	for i := range height {
 		if i%2 == 0 {
-			left[i] = "("
-			right[i] = ""
+			shape[i] = "("
 		} else {
-			left[i] = ""
-			right[i] = ")"
+			shape[i] = " )"
 		}
-	}
-
-	// Interleave the two sides
-	shape := make([]string, 0)
-	for i := range height {
-		shape = append(shape, left[i]+right[i])
 	}
 
 	x := rand.Intn(anim.Width()-2) + 1
 	y := anim.Height() - height
-	animSpeed := rand.Float64()*0.05 + 0.25
 
-	e := &Entity{
+	anim.NewEntity(&Entity{
 		Name:         fmt.Sprintf("seaweed_%d", rand.Int63()),
+		Type:         "seaweed",
 		Shape:        shape,
 		Position:     [3]int{x, y, DepthSeaweed},
 		DefaultColor: tcell.GetColor("green"),
-		CallbackArgs: []float64{0, 0, 0, animSpeed},
 		DieTime:      time.Now().Add(time.Duration(rand.Intn(4*60)+8*60) * time.Second),
-		DeathCB:      func(e *Entity, a *Animation) { addSeaweed(a) },
-	}
-	anim.NewEntity(e)
+		DeathCB:      func(_ *Entity, a *Animation) { addSeaweed(a) },
+	})
 }
 
-// addAllFish adds fish based on screen size
+// addAllFish adds fish proportional to the underwater screen area.
 func addAllFish(anim *Animation) {
 	screenSize := (anim.Height() - 9) * anim.Width()
-	fishCount := screenSize / 350
-	for range fishCount {
+	count := max(screenSize/350, 1)
+	for range count {
 		addFish(anim)
 	}
 }
