@@ -1,6 +1,6 @@
 # Kittyquarium
 
-Port of Asciiquarium from Perl to Go. I also plan to add support for Kitty.
+Port of Asciiquarium from Perl to Go.
 
-* Version: 0.0.1
 * License: GPL2
+* Version: 0.0.1
