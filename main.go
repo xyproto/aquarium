@@ -100,7 +100,6 @@ type Animation struct {
 	paused      bool
 	colorMap    map[byte]tcell.Color
 	version     string
-	kitty       *KittyRenderer
 }
 
 func NewAnimation() (*Animation, error) {
@@ -277,11 +276,6 @@ func (a *Animation) RenderScreen() {
 	}
 
 	a.screen.Show()
-
-	// Kitty graphics overlay (rendered after tcell frame)
-	if a.kitty != nil && a.kitty.enabled {
-		a.kitty.Render(a)
-	}
 }
 
 func (a *Animation) bgStyle() tcell.Style {
@@ -328,9 +322,6 @@ func (a *Animation) drawEntity(e *Entity) {
 }
 
 func (a *Animation) Close() {
-	if a.kitty != nil && a.kitty.enabled {
-		a.kitty.Cleanup()
-	}
 	a.screen.Fini()
 }
 
@@ -341,11 +332,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer anim.Close()
-
-	// Upload fish images for Kitty mode
-	if anim.kitty != nil && anim.kitty.enabled {
-		anim.kitty.Init()
-	}
 
 	initializeAquarium(anim)
 
