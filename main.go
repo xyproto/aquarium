@@ -112,12 +112,7 @@ func NewAnimation() (*Animation, error) {
 		return nil, err
 	}
 
-	var bgColor tcell.Color
-	if isKittyTerminal() {
-		bgColor = tcell.NewRGBColor(0, 8, 24) // deep ocean blue
-	} else {
-		bgColor = tcell.ColorBlack
-	}
+	bgColor := tcell.ColorBlack
 	s.SetStyle(tcell.StyleDefault.Background(bgColor).Foreground(tcell.ColorWhite))
 	s.Clear()
 
@@ -131,17 +126,10 @@ func NewAnimation() (*Animation, error) {
 		colorMap: makeColorMap(),
 	}
 
-	if isKittyTerminal() {
-		anim.kitty = NewKittyRenderer()
-	}
-
 	return anim, nil
 }
 
 func makeColorMap() map[byte]tcell.Color {
-	if isKittyTerminal() {
-		return makeKittyColorMap()
-	}
 	return map[byte]tcell.Color{
 		'c': tcell.GetColor("cyan"),
 		'C': tcell.GetColor("darkcyan"),
@@ -297,9 +285,6 @@ func (a *Animation) RenderScreen() {
 }
 
 func (a *Animation) bgStyle() tcell.Style {
-	if isKittyTerminal() {
-		return tcell.StyleDefault.Background(tcell.NewRGBColor(0, 8, 24))
-	}
 	return tcell.StyleDefault.Background(tcell.ColorBlack)
 }
 

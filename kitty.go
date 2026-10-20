@@ -11,13 +11,6 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-// isKittyTerminal returns true when running inside the Kitty terminal emulator.
-func isKittyTerminal() bool {
-	//return strings.Contains(os.Getenv("TERM"), "kitty") ||
-	//os.Getenv("TERM_PROGRAM") == "kitty"
-	return false
-}
-
 // makeKittyColorMap returns a richer, 24-bit RGB color map for use inside Kitty.
 func makeKittyColorMap() map[byte]tcell.Color {
 	return map[byte]tcell.Color{
@@ -62,7 +55,7 @@ type fishPalette struct {
 
 func NewKittyRenderer() *KittyRenderer {
 	return &KittyRenderer{
-		enabled: isKittyTerminal(),
+		enabled: false,
 		fishColors: []fishPalette{
 			{body: color.NRGBA{255, 140, 0, 255}, tail: color.NRGBA{200, 80, 0, 255}, fin: color.NRGBA{255, 200, 0, 255}, eye: color.NRGBA{0, 0, 0, 255}},
 			{body: color.NRGBA{0, 180, 220, 255}, tail: color.NRGBA{0, 100, 180, 255}, fin: color.NRGBA{100, 220, 255, 255}, eye: color.NRGBA{0, 0, 0, 255}},
