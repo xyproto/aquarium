@@ -1,4 +1,4 @@
-# Kittyquarium
+# Aquarium
 
 Port of Asciiquarium from Perl to Go.
 
