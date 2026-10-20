@@ -7,15 +7,15 @@ import (
 	"image/color"
 	"math"
 	"os"
-	"strings"
 
 	"github.com/gdamore/tcell/v2"
 )
 
 // isKittyTerminal returns true when running inside the Kitty terminal emulator.
 func isKittyTerminal() bool {
-	return strings.Contains(os.Getenv("TERM"), "kitty") ||
-		os.Getenv("TERM_PROGRAM") == "kitty"
+	//return strings.Contains(os.Getenv("TERM"), "kitty") ||
+	//os.Getenv("TERM_PROGRAM") == "kitty"
+	return false
 }
 
 // makeKittyColorMap returns a richer, 24-bit RGB color map for use inside Kitty.
