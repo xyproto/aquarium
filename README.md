@@ -17,4 +17,4 @@ The executable will then end up in `~/go/bin` (or where `$GOPATH` / `$GOBIN` has
 ### General info
 
 * License: GPL2
-* Version: 1.0.1
+* Version: 1.0.2
