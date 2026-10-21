@@ -126,7 +126,7 @@ func addDolphins(anim *Animation) {
 	d2Name := fmt.Sprintf("dolphin2_%d", rand.Int63())
 	d1Name := fmt.Sprintf("dolphin1_%d", rand.Int63())
 
-	d3 := makeDolphin(d3Name, startX-2*distance, 8, 0, false, func(_ *Entity, a *Animation) { randomObject(a) })
+	d3 := makeDolphin(d3Name, startX-2*distance, 8, 0, false, nil)
 	d2 := makeDolphin(d2Name, startX-distance, 2, 12, false, nil)
 	d1 := makeDolphin(d1Name, startX, 5, 24, true, func(_ *Entity, a *Animation) {
 		// When lead dolphin exits, enable die-offscreen for trailing ones
